@@ -1242,7 +1242,13 @@ namespace Frida.Gadget {
 	}
 
 	private sealed class Script : Object, RpcPeer {
-		private const uint8 QUICKJS_BYTECODE_MAGIC = 0x02;
+		private const uint8 QUICKJS_BYTECODE_MAGIC =
+#if BIG_ENDIAN
+			0x42
+#else
+			0x02
+#endif
+			;
 
 		public enum ChangeBehavior {
 			IGNORE,
@@ -1694,7 +1700,7 @@ namespace Frida.Gadget {
 			public abstract async void close (Cancellable? cancellable = null) throws IOError;
 		}
 
-		private sealed class AuthenticationChannel : Object, Peer, AuthenticationService {
+		private class AuthenticationChannel : Object, Peer, AuthenticationService {
 			public weak ControlServer parent {
 				get;
 				construct;
@@ -1742,7 +1748,7 @@ namespace Frida.Gadget {
 			}
 		}
 
-		private sealed class ControlChannel : Object, Peer, HostSession {
+		private class ControlChannel : Object, Peer, HostSession {
 			public weak ControlServer parent {
 				get;
 				construct;
@@ -1941,7 +1947,7 @@ namespace Frida.Gadget {
 			}
 		}
 
-		private sealed class LiveAgentSession : BaseAgentSession {
+		private class LiveAgentSession : BaseAgentSession {
 			public ControlChannel? controller {
 				get;
 				set;

@@ -8,6 +8,8 @@ namespace Frida.Fruity {
 		private Gee.List<Backend> backends = new Gee.ArrayList<Backend> ();
 		private Gee.Map<string, Device> devices = new Gee.HashMap<string, Device> ();
 
+		private PairingStore pairing_store = new PairingStore ();
+
 		private enum State {
 			CREATED,
 			STARTING,
@@ -18,11 +20,11 @@ namespace Frida.Fruity {
 		private delegate void NotifyCompleteFunc ();
 
 		construct {
-			add_backend (new UsbmuxBackend ());
+			add_backend (new UsbmuxBackend (pairing_store));
 #if MACOS
 			add_backend (new MacOSCoreDeviceBackend ());
 #else
-			add_backend (new PortableCoreDeviceBackend ());
+			add_backend (new PortableCoreDeviceBackend (pairing_store));
 #endif
 		}
 
@@ -184,10 +186,6 @@ namespace Frida.Fruity {
 			default = new Gee.TreeSet<Transport> (compare_transports);
 		}
 
-		private Gee.Queue<UsbmuxLockdownServiceRequest> usbmux_lockdown_service_requests =
-			new Gee.ArrayQueue<UsbmuxLockdownServiceRequest> ();
-		private LockdownClient? cached_usbmux_lockdown_client;
-
 		private const string[] LOCKDOWN_SERVICES_WITHOUT_ESCROW_BAG_SUPPORT = {
 			"com.apple.accessibility.axAuditDaemon.remoteserver",
 			"com.apple.afc",
@@ -205,26 +203,30 @@ namespace Frida.Fruity {
 		}
 
 		public UsbmuxDevice? find_usbmux_device () {
-			var transport = transports.first_match (t => t.usbmux_device != null && t.connection_type == USB);
-			if (transport == null)
-				transport = transports.first_match (t => t.usbmux_device != null);
-			return (transport != null) ? transport.usbmux_device : null;
+			var t = transports.first_match (t => t.usbmux_device != null);
+			return (t != null) ? t.usbmux_device : null;
 		}
 
-		public UsbmuxDevice get_usbmux_device () throws Error {
-			var d = find_usbmux_device ();
-			if (d == null)
+		private UsbmuxTransport get_usbmux_transport () throws Error {
+			var t = transports.first_match (t => t is UsbmuxTransport);
+			if (t == null)
 				throw new Error.NOT_SUPPORTED ("USB connection not available");
-			return d;
+			return (UsbmuxTransport) t;
 		}
 
 		public async Tunnel? find_tunnel (Cancellable? cancellable) throws Error, IOError {
 			var usbmux_device = find_usbmux_device ();
-			foreach (var transport in transports) {
+
+			var transports_to_try = new Gee.ArrayList<Transport> ();
+			transports_to_try.add_all_iterator (transports.filter (t => t.usbmux_device == null));
+			transports_to_try.add_all_iterator (transports.filter (t => t.usbmux_device != null));
+
+			foreach (var transport in transports_to_try) {
 				Tunnel? tunnel = yield transport.find_tunnel (usbmux_device, cancellable);
 				if (tunnel != null)
 					return tunnel;
 			}
+
 			return null;
 		}
 
@@ -283,19 +285,7 @@ namespace Frida.Fruity {
 				return stream;
 			}
 
-			if (service_name == "") {
-				var client = yield open_usbmux_lockdown_client (cancellable);
-				return client.service.stream;
-			}
-
-			var request = new UsbmuxLockdownServiceRequest (service_name, cancellable);
-			bool first_request = usbmux_lockdown_service_requests.is_empty;
-			usbmux_lockdown_service_requests.offer (request);
-
-			if (first_request)
-				process_usbmux_lockdown_service_requests.begin ();
-
-			return yield request.promise.future.wait_async (cancellable);
+			return yield get_usbmux_transport ().open_lockdown_service (service_name, cancellable);
 		}
 
 		// FIXME: Replace with `element in array`-check once Vala compiler bug has been fixed so generated C code is warning-free.
@@ -305,41 +295,6 @@ namespace Frida.Fruity {
 					return false;
 			}
 			return true;
-		}
-
-		private async void process_usbmux_lockdown_service_requests () {
-			UsbmuxLockdownServiceRequest? req;
-			bool already_invalidated = false;
-			while ((req = usbmux_lockdown_service_requests.peek ()) != null) {
-				try {
-					if (cached_usbmux_lockdown_client == null)
-						cached_usbmux_lockdown_client = yield open_usbmux_lockdown_client (req.cancellable);
-					var stream = yield cached_usbmux_lockdown_client.start_service (req.service_name, req.cancellable);
-					req.promise.resolve (stream);
-				} catch (GLib.Error e) {
-					if (e is LockdownError.CONNECTION_CLOSED && cached_usbmux_lockdown_client != null &&
-							!already_invalidated) {
-						cached_usbmux_lockdown_client = null;
-						already_invalidated = true;
-						continue;
-					}
-					req.promise.reject ((e is LockdownError.INVALID_SERVICE)
-						? (Error) new Error.NOT_SUPPORTED ("%s", e.message)
-						: (Error) new Error.TRANSPORT ("%s", e.message));
-				}
-
-				usbmux_lockdown_service_requests.poll ();
-			}
-		}
-
-		private async LockdownClient open_usbmux_lockdown_client (Cancellable? cancellable) throws Error, IOError {
-			try {
-				var client = yield LockdownClient.open (get_usbmux_device (), cancellable);
-				yield client.start_session (cancellable);
-				return client;
-			} catch (LockdownError e) {
-				throw new Error.NOT_SUPPORTED ("%s", e.message);
-			}
 		}
 
 		public async IOStream open_channel (string address, Cancellable? cancellable) throws Error, IOError {
@@ -452,17 +407,6 @@ namespace Frida.Fruity {
 				score++;
 			return score;
 		}
-
-		private class UsbmuxLockdownServiceRequest {
-			public string service_name;
-			public Cancellable? cancellable;
-			public Promise<IOStream> promise = new Promise<IOStream> ();
-
-			public UsbmuxLockdownServiceRequest (string service_name, Cancellable? cancellable) {
-				this.service_name = service_name;
-				this.cancellable = cancellable;
-			}
-		}
 	}
 
 	public class TcpChannel {
@@ -537,6 +481,11 @@ namespace Frida.Fruity {
 	}
 
 	private sealed class UsbmuxBackend : Object, Backend {
+		public PairingStore pairing_store {
+			get;
+			construct;
+		}
+
 		public bool available {
 			get {
 				return usbmux != null;
@@ -552,6 +501,10 @@ namespace Frida.Fruity {
 		private SourceFunc on_start_completed;
 
 		private Cancellable io_cancellable = new Cancellable ();
+
+		public UsbmuxBackend (PairingStore pairing_store) {
+			Object (pairing_store: pairing_store);
+		}
 
 		public async void start (Cancellable? cancellable) throws IOError {
 			start_request = new Promise<bool> ();
@@ -669,7 +622,7 @@ namespace Frida.Fruity {
 		}
 
 		private async void add_transport (UsbmuxDevice device) {
-			var transport = new UsbmuxTransport (device);
+			var transport = new UsbmuxTransport (device, pairing_store);
 			transports[device] = transport;
 
 			string? name = null;
@@ -735,6 +688,11 @@ namespace Frida.Fruity {
 			construct;
 		}
 
+		public PairingStore pairing_store {
+			get;
+			construct;
+		}
+
 		public ConnectionType connection_type {
 			get {
 				return device.connection_type;
@@ -768,16 +726,218 @@ namespace Frida.Fruity {
 		internal string _name;
 		internal Variant? _icon;
 
-		public UsbmuxTransport (UsbmuxDevice device) {
-			Object (device: device);
+		private Promise<Tunnel?>? tunnel_request;
+
+		private Gee.Queue<UsbmuxLockdownServiceRequest> lockdown_service_requests =
+			new Gee.ArrayQueue<UsbmuxLockdownServiceRequest> ();
+		private LockdownClient? cached_lockdown_client;
+
+		public UsbmuxTransport (UsbmuxDevice device, PairingStore store) {
+			Object (device: device, pairing_store: store);
 		}
 
 		public async Tunnel? find_tunnel (UsbmuxDevice? device, Cancellable? cancellable) throws Error, IOError {
-			return null;
+			while (tunnel_request != null) {
+				try {
+					return yield tunnel_request.future.wait_async (cancellable);
+				} catch (Error e) {
+					throw e;
+				} catch (IOError e) {
+					cancellable.set_error_if_cancelled ();
+				}
+			}
+			tunnel_request = new Promise<Tunnel> ();
+
+			try {
+				IOStream? stream = null;
+				try {
+					stream = yield open_lockdown_service ("com.apple.internal.devicecompute.CoreDeviceProxy", cancellable);
+				} catch (Error e) {
+					if (!(e is Error.NOT_SUPPORTED))
+						throw e;
+				}
+
+				UsbmuxTunnel? tunnel = null;
+				if (stream != null) {
+					tunnel = new UsbmuxTunnel (stream, pairing_store);
+					tunnel.lost.connect (on_tunnel_lost);
+					try {
+						yield tunnel.open (cancellable);
+					} catch (Error e) {
+						if (e is Error.NOT_SUPPORTED)
+							tunnel = null;
+						else
+							throw e;
+					}
+				}
+
+				tunnel_request.resolve (tunnel);
+
+				return tunnel;
+			} catch (GLib.Error e) {
+				tunnel_request.reject (e);
+				tunnel_request = null;
+
+				throw_api_error (e);
+			}
+		}
+
+		private void on_tunnel_lost () {
+			tunnel_request = null;
+		}
+
+		public async IOStream open_lockdown_service (string service_name, Cancellable? cancellable) throws Error, IOError {
+			if (service_name == "") {
+				var client = yield open_usbmux_lockdown_client (cancellable);
+				return client.service.stream;
+			}
+
+			var request = new UsbmuxLockdownServiceRequest (service_name, cancellable);
+			bool first_request = lockdown_service_requests.is_empty;
+			lockdown_service_requests.offer (request);
+
+			if (first_request)
+				process_lockdown_service_requests.begin ();
+
+			return yield request.promise.future.wait_async (cancellable);
+		}
+
+		private async void process_lockdown_service_requests () {
+			UsbmuxLockdownServiceRequest? req;
+			bool already_invalidated = false;
+			while ((req = lockdown_service_requests.peek ()) != null) {
+				try {
+					if (cached_lockdown_client == null)
+						cached_lockdown_client = yield open_usbmux_lockdown_client (req.cancellable);
+					var stream = yield cached_lockdown_client.start_service (req.service_name, req.cancellable);
+					req.promise.resolve (stream);
+				} catch (GLib.Error e) {
+					if (e is LockdownError.CONNECTION_CLOSED && cached_lockdown_client != null &&
+							!already_invalidated) {
+						cached_lockdown_client = null;
+						already_invalidated = true;
+						continue;
+					}
+					req.promise.reject ((e is LockdownError.INVALID_SERVICE)
+						? (Error) new Error.NOT_SUPPORTED ("%s", e.message)
+						: (Error) new Error.TRANSPORT ("%s", e.message));
+				}
+
+				lockdown_service_requests.poll ();
+			}
+		}
+
+		private async LockdownClient open_usbmux_lockdown_client (Cancellable? cancellable) throws Error, IOError {
+			try {
+				var client = yield LockdownClient.open (device, cancellable);
+				yield client.start_session (cancellable);
+				return client;
+			} catch (LockdownError e) {
+				throw new Error.NOT_SUPPORTED ("%s", e.message);
+			}
+		}
+
+		private class UsbmuxLockdownServiceRequest {
+			public string service_name;
+			public Cancellable? cancellable;
+			public Promise<IOStream> promise = new Promise<IOStream> ();
+
+			public UsbmuxLockdownServiceRequest (string service_name, Cancellable? cancellable) {
+				this.service_name = service_name;
+				this.cancellable = cancellable;
+			}
+		}
+	}
+
+	private sealed class UsbmuxTunnel : Object, Tunnel {
+		public signal void lost ();
+
+		public IOStream stream {
+			get;
+			construct;
+		}
+
+		public PairingStore pairing_store {
+			get;
+			construct;
+		}
+
+		public DiscoveryService discovery {
+			get {
+				return _discovery_service;
+			}
+		}
+
+		public int64 opened_at {
+			get {
+				return _opened_at;
+			}
+		}
+
+		public Bytes? remote_unlock_host_key {
+			get {
+				return null;
+			}
+		}
+
+		private UsbNcmDriver? ncm;
+		private TcpTunnelConnection? tunnel_connection;
+		private DiscoveryService? _discovery_service;
+		private int64 _opened_at = -1;
+
+		public UsbmuxTunnel (IOStream stream, PairingStore store) {
+			Object (stream: stream, pairing_store: store);
+		}
+
+		public async void open (Cancellable? cancellable) throws Error, IOError {
+			var tc = yield TcpTunnelConnection.open_stream (stream, cancellable);
+			tunnel_connection = tc;
+			tunnel_connection.closed.connect (on_tunnel_connection_close);
+
+			_opened_at = get_monotonic_time ();
+
+			var rsd_endpoint = (InetSocketAddress) Object.new (typeof (InetSocketAddress),
+				address: tc.remote_address,
+				port: tc.remote_rsd_port,
+				scope_id: tc.tunnel_netstack.scope_id
+			);
+			var rsd_connection = yield tc.tunnel_netstack.open_tcp_connection (rsd_endpoint, cancellable);
+			var disco = yield DiscoveryService.open (rsd_connection, cancellable);
+
+			tunnel_connection = tc;
+			_discovery_service = disco;
+		}
+
+		public async void close (Cancellable? cancellable) throws IOError {
+			_discovery_service.close ();
+
+			yield tunnel_connection.close (cancellable);
+
+			if (ncm != null)
+				ncm.close ();
+		}
+
+		public async IOStream open_tcp_connection (uint16 port, Cancellable? cancellable) throws Error, IOError {
+			var netstack = tunnel_connection.tunnel_netstack;
+			var endpoint = (InetSocketAddress) Object.new (typeof (InetSocketAddress),
+				address: tunnel_connection.remote_address,
+				port: port,
+				scope_id: netstack.scope_id
+			);
+			return yield netstack.open_tcp_connection (endpoint, cancellable);
+		}
+
+		private void on_tunnel_connection_close () {
+			lost ();
 		}
 	}
 
 	private sealed class PortableCoreDeviceBackend : Object, Backend, UsbDeviceBackend {
+		public PairingStore pairing_store {
+			get;
+			construct;
+		}
+
 		public bool supports_modeswitch {
 			get {
 				return LibUSB.has_capability (HAS_HOTPLUG) != 0;
@@ -811,8 +971,6 @@ namespace Frida.Fruity {
 		private Gee.Map<string, PortableCoreDeviceNetworkTransport> network_transports =
 			new Gee.HashMap<string, PortableCoreDeviceNetworkTransport> ();
 
-		private PairingStore pairing_store = new PairingStore ();
-
 		private MainContext main_context;
 
 		private Cancellable io_cancellable = new Cancellable ();
@@ -831,6 +989,10 @@ namespace Frida.Fruity {
 		private const uint16 PRODUCT_ID_IPAD = 0x12ab;
 
 		private delegate void NotifyCompleteFunc ();
+
+		public PortableCoreDeviceBackend (PairingStore pairing_store) {
+			Object (pairing_store: pairing_store);
+		}
 
 		construct {
 			main_context = MainContext.ref_thread_default ();
@@ -1403,7 +1565,8 @@ namespace Frida.Fruity {
 							supported_by_os = ios_major_version >= 17;
 						}
 					} catch (LockdownError e) {
-						throw new Error.PERMISSION_DENIED ("%s", e.message);
+						if (!(e is LockdownError.NOT_PAIRED))
+							throw new Error.PERMISSION_DENIED ("%s", e.message);
 					}
 				}
 
@@ -1564,36 +1727,65 @@ namespace Frida.Fruity {
 			public signal void response_received (Bytes response, InetSocketAddress sender);
 
 			public NetworkStack netstack;
-			public UdpSocket sock;
-			public DatagramBasedSource response_source;
+			private Cancellable? io_cancellable;
+
+			private UdpSocket sock;
+			private DatagramBased sock_datagram;
+
+			private Bytes remoted_mdns_request;
+			private InetSocketAddress mdns_address;
+
+			private TimeoutSource retransmit_source;
+			private DatagramBasedSource response_source;
 
 			public ActiveMulticastDnsProbe (InetSocketAddress ifaddr, MainContext main_context, Cancellable? cancellable)
 					throws Error, IOError {
 				var local_ip = ifaddr.get_address ();
 				netstack = new SystemNetworkStack (local_ip, ifaddr.scope_id);
+				io_cancellable = cancellable;
 
 				sock = netstack.create_udp_socket ();
 				sock.bind ((InetSocketAddress) Object.new (typeof (InetSocketAddress),
 					address: local_ip,
 					scope_id: netstack.scope_id
 				));
-				DatagramBased sock_datagram = sock.datagram_based;
+				sock_datagram = sock.datagram_based;
 
-				var remoted_mdns_request = make_remoted_mdns_request ();
-				var mdns_address = (InetSocketAddress) Object.new (typeof (InetSocketAddress),
+				remoted_mdns_request = make_remoted_mdns_request ();
+
+				mdns_address = (InetSocketAddress) Object.new (typeof (InetSocketAddress),
 					address: new InetAddress.from_string ("ff02::fb"),
 					port: 5353,
 					scope_id: netstack.scope_id
 				);
-				Udp.send_to (remoted_mdns_request.get_data (), mdns_address, sock_datagram, cancellable);
+
+				retransmit_source = new TimeoutSource (250);
+				retransmit_source.set_callback (on_retransmit_tick);
+				retransmit_source.attach (main_context);
 
 				response_source = sock_datagram.create_source (IN, cancellable);
 				response_source.set_callback (on_socket_readable);
 				response_source.attach (main_context);
+
+				transmit_request ();
 			}
 
 			public void cancel () {
 				response_source.destroy ();
+				retransmit_source.destroy ();
+			}
+
+			private void transmit_request () throws Error, IOError {
+				Udp.send_to (remoted_mdns_request.get_data (), mdns_address, sock_datagram, io_cancellable);
+			}
+
+			private bool on_retransmit_tick () {
+				try {
+					transmit_request ();
+				} catch (GLib.Error e) {
+				}
+
+				return Source.CONTINUE;
 			}
 
 			private bool on_socket_readable () {

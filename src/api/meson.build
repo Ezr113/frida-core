@@ -3,6 +3,11 @@ fs = import('fs')
 generate_api = [python, files('generate.py')]
 
 generate_api_args = [
+  frida_version,
+  frida_major_version.to_string(),
+  frida_minor_version.to_string(),
+  frida_micro_version.to_string(),
+  frida_nano_version.to_string(),
   api_version,
   core_build_dir / 'frida-core.h',
   core_build_dir / core_gir_name,
@@ -34,7 +39,10 @@ core_public_h = core_api[0]
 core_public_gir = core_api[1]
 core_public_vapi = [core_api[2], core_api[3]]
 
-gio_gir = fs.copyfile('Gio-2.0.gir')
+install_glib_girs = not gi_dep.found() and not fs.exists(girdir / 'GLib-2.0.gir')
+glib_gir = fs.copyfile('GLib-2.0.gir', install: install_glib_girs, install_dir: girdir)
+gobject_gir = fs.copyfile('GObject-2.0.gir', install: install_glib_girs, install_dir: girdir)
+gio_gir = fs.copyfile('Gio-2.0.gir', install: install_glib_girs, install_dir: girdir)
 
 core_public_vapi_stamp = custom_target('frida-core-vapi-stamp',
   input: core_public_vapi,
@@ -89,7 +97,7 @@ installed_variables = {
 }
 
 core_public_dep = declare_dependency(
-  sources: [core_public_h, core_public_gir, gio_gir, core_public_vapi_stamp, core_public_extra_headers],
+  sources: [core_public_h, core_public_gir, glib_gir, gobject_gir, gio_gir, core_public_vapi_stamp, core_public_extra_headers],
   include_directories: include_directories('.'),
   link_args: backend_libs_private,
   link_with: core_public_lib,

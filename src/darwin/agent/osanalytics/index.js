@@ -1,3 +1,5 @@
+import ObjC from 'frida-objc-bridge';
+
 const YES = ptr(1);
 
 const {
@@ -53,7 +55,8 @@ function tryInitialize() {
 }
 
 if (!tryInitialize()) {
-  const listener = Interceptor.attach(Module.getExportByName('/usr/lib/system/libsystem_trace.dylib', 'os_log_type_enabled'), () => {
+  const listener = Interceptor.attach(
+      Process.getModuleByName('/usr/lib/system/libsystem_trace.dylib').getExportByName('os_log_type_enabled'), () => {
     tryInitialize();
     listener.detach();
   });

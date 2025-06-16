@@ -210,24 +210,6 @@ Object.defineProperties(globalThis, {
             }
         }
     },
-    ObjC: {
-        enumerable: true,
-        value: {
-            available: false
-        }
-    },
-    Swift: {
-        enumerable: true,
-        value: {
-            available: false
-        }
-    },
-    Java: {
-        enumerable: true,
-        value: {
-            available: false
-        }
-    },
     console: {
         enumerable: true,
         value: new Console()
@@ -278,6 +260,8 @@ Object.defineProperties(Process, {
                     base: NULL,
                     size: 0x1000,
                     path: "/kernel",
+                    ensureInitialized() {
+                    },
                     enumerateImports() {
                         return [];
                     },
@@ -290,11 +274,23 @@ Object.defineProperties(Process, {
                     enumerateRanges() {
                         return [];
                     },
+                    enumerateSections() {
+                        return [];
+                    },
+                    enumerateDependencies() {
+                        return [];
+                    },
                     findExportByName() {
                         return null;
                     },
-                    getExportByName(exportName) {
-                        throw new Error(`unable to find export '${exportName}'`);
+                    getExportByName(name) {
+                        throw new Error(`unable to find export '${name}'`);
+                    },
+                    findSymbolByName() {
+                        return null;
+                    },
+                    getSymbolByName(name) {
+                        throw new Error(`unable to find symbol '${name}'`);
                     }
                 }
             ];

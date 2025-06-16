@@ -360,12 +360,7 @@ namespace Frida {
 
 				start_request.resolve (true);
 			} catch (IOError e) {
-				service.provider_available.disconnect (on_provider_available);
-				service.provider_unavailable.disconnect (on_provider_unavailable);
-				service = null;
-
 				start_request.reject (e);
-				start_request = null;
 			}
 		}
 
@@ -1464,7 +1459,9 @@ namespace Frida {
 					break;
 				}
 			}
-			assert (session_id != null);
+			if (session_id == null)
+				return;
+
 			agent_sessions.unset (session_id);
 
 			if (may_block) {
@@ -1488,6 +1485,8 @@ namespace Frida {
 			Promise<bool> detach_request;
 			if (pending_detach_requests.unset (id, out detach_request))
 				detach_request.resolve (true);
+			else if (session != null)
+				agent_sessions.unset (id);
 		}
 
 		private void on_spawn_added (HostSpawnInfo info) {
@@ -1867,18 +1866,15 @@ namespace Frida {
 		public signal void detached ();
 		public signal void message (string json, Bytes? data);
 
-		public weak Device device {
-			get;
-			construct;
-		}
+		private weak Device device;
 
 		private Promise<BusSession>? attach_request;
-
 		private BusSession? active_session;
+
 		private Cancellable io_cancellable = new Cancellable ();
 
 		internal Bus (Device device) {
-			Object (device: device);
+			this.device = device;
 		}
 
 		public bool is_detached () {

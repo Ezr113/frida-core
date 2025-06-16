@@ -6,6 +6,8 @@ project('frida-core', 'vala', 'c', 'cpp',
   default_options: ['c_std=gnu99,c99', 'cpp_std=c++17'],
 )
 
+fs = import('fs')
+
 if not meson.get_compiler('vala').version().endswith('-frida')
   error('''Incompatible Vala compiler detected.
 
@@ -20,7 +22,7 @@ cc = meson.get_compiler('c')
 cpp = meson.get_compiler('cpp')
 
 releng = meson.global_source_root() / 'releng'
-if not import('fs').exists(releng)
+if not fs.exists(releng)
   releng = meson.project_source_root() / 'releng'
 endif
 
@@ -98,11 +100,6 @@ else
   host_cpu_mode = '32'
 endif
 host_docks_mobile_devices = host_os in ['windows', 'macos', 'linux'] and host_cpu_mode == '64'
-gumjs_archs = {
-  'x86': 'ia32',
-  'x86_64': 'x64',
-}
-host_arch_gumjs = gumjs_archs.get(host_arch, host_arch)
 
 if host_os_family == 'darwin'
   c_languages += ['objc', 'objcpp']
@@ -362,6 +359,44 @@ if host_os == 'android'
   ])
 endif
 
+if host_toolchain == 'microsoft'
+  lib = find_program('lib')
+  ar = ''
+  nm = ''
+  ranlib = ''
+  strip = ''
+else
+  lib = ''
+  ar = find_program('ar')
+  nm = find_program('nm')
+  ranlib = find_program('ranlib')
+  strip = find_program('strip')
+endif
+if host_os_family != 'windows'
+  if host_os_family == 'darwin'
+    readelf = ''
+    otool = find_program('otool')
+    libtool = find_program('libtool')
+  else
+    readelf = find_program('readelf')
+    otool = ''
+    libtool = ''
+  endif
+else
+  readelf = ''
+  otool = ''
+  libtool = ''
+endif
+if host_os_family == 'darwin'
+  install_name_tool = find_program('install_name_tool')
+  lipo = find_program('lipo')
+  codesign = find_program('codesign')
+else
+  install_name_tool = ''
+  lipo = ''
+  codesign = ''
+endif
+
 have_local_backend = get_option('local_backend').allowed()
 have_fruity_backend = get_option('fruity_backend') \
     .disable_auto_if(not host_docks_mobile_devices) \
@@ -374,15 +409,47 @@ have_barebone_backend = get_option('barebone_backend') \
     .disable_if(not quickjs_dep.found()) \
     .disable_auto_if(not host_docks_mobile_devices) \
     .allowed()
-have_compiler_backend = get_option('compiler_backend') \
-    .disable_if(not have_local_backend, error_message: 'compiler backend requires the local backend for script execution') \
-    .disable_auto_if(host_os == 'watchos') \
-    .allowed()
-if get_option('compiler_snapshot').auto()
-  # Generating our snapshot with V8's CPU simulator takes a very long time.
-  generate_compiler_snapshot = meson.can_run_host_binaries()
-else
-  generate_compiler_snapshot = get_option('compiler_snapshot').enabled()
+compiler_backend_opt = get_option('compiler_backend') \
+    .disable_auto_if(host_os == 'watchos')
+have_compiler_backend = false
+if compiler_backend_opt.allowed()
+  go = find_program('go', native: true, required: false)
+  if go.found()
+    message('Detecting cgo availability')
+    detect_output = run_command(
+      [
+        python,
+        files('tools' / 'cgo' / 'detect.py'),
+        go,
+        host_os,
+        host_abi,
+        cc.get_id(),
+        '>>>', cc.cmd_array(), '<<<',
+        '>>>', ar, '<<<',
+        '>>>', nm, '<<<',
+        '>>>', ranlib, '<<<',
+      ],
+      capture: true,
+      check: true
+    ).stdout()
+    lines = detect_output.split('\n')
+    status = lines[0]
+    if status == 'ok'
+      have_compiler_backend = true
+      go_config = lines[1]
+    else
+      error_message = lines[1]
+      if compiler_backend_opt.enabled()
+        error(error_message)
+      else
+        warning(f'Building without Compiler backend: @error_message@')
+      endif
+    endif
+  elif compiler_backend_opt.enabled()
+    error('Need Go >= 1.24 to build the Compiler backend powered by ESBuild and typescript-go')
+  else
+    warning('Building without Compiler backend: Go >= 1.24 not found')
+  endif
 endif
 
 build_gadget = get_option('gadget') \
@@ -422,7 +489,7 @@ foreach b : [['local', have_local_backend],
   endif
 endforeach
 
-if have_barebone_backend or have_compiler_backend
+if host_os_family == 'darwin' or host_os == 'android' or have_barebone_backend or have_compiler_backend
   node = find_program('node', version: '>=18.0.0', native: true, required: false)
   if not node.found()
     error('Need Node.js >= 18.0.0 to process JavaScript code at build time')
@@ -452,12 +519,6 @@ gumjs_inspector_vala_args = ['--pkg=frida-gumjs-inspector-1.0', gum_vala_args]
 have_v8 = gumjs_dep.get_variable('gumjs_v8') == 'enabled'
 if have_v8
   vala_flags += ['--define=HAVE_V8']
-  v8_mksnapshot = find_program('v8-mksnapshot-@0@-@1@'.format(host_os, host_abi), required: false)
-  if not v8_mksnapshot.found()
-    v8_mksnapshot = ''
-  endif
-else
-  v8_mksnapshot = ''
 endif
 
 backend_deps_private = []
@@ -579,42 +640,6 @@ if host_os in ['ios', 'tvos']
   backend_libs_private += ['-Wl,-framework,CoreGraphics', '-Wl,-framework,UIKit']
 endif
 
-if host_toolchain == 'microsoft'
-  lib = find_program('lib')
-  ar = ''
-  nm = ''
-  strip = ''
-else
-  lib = ''
-  ar = find_program('ar')
-  nm = find_program('nm')
-  strip = find_program('strip')
-endif
-if host_os_family != 'windows'
-  if host_os_family == 'darwin'
-    readelf = ''
-    otool = find_program('otool')
-    libtool = find_program('libtool')
-  else
-    readelf = find_program('readelf')
-    otool = ''
-    libtool = ''
-  endif
-else
-  readelf = ''
-  otool = ''
-  libtool = ''
-endif
-if host_os_family == 'darwin'
-  install_name_tool = find_program('install_name_tool')
-  lipo = find_program('lipo')
-  codesign = find_program('codesign')
-else
-  install_name_tool = ''
-  lipo = ''
-  codesign = ''
-endif
-
 if get_option('devkits').length() != 0
   if get_option('default_library') != 'static'
     error('Devkits can only be generated from static libraries')
@@ -672,6 +697,8 @@ post_process = [
   '@INPUT0@',
 ]
 
+compile_js_agent = files('tools' / 'compile-js-agent.py')
+
 mapper_opt = get_option('mapper')
 if mapper_opt.auto()
   have_mapper = host_os_family == 'darwin'
@@ -706,14 +733,15 @@ vala_flags += [
   '--pkg', 'config',
 ]
 
-vala_flags += ['--define=' + host_os_family.to_upper()]
+vala_flags += '--define=' + host_os_family.to_upper()
 if host_os != host_os_family
-  vala_flags += ['--define=' + host_os.to_upper()]
+  vala_flags += '--define=' + host_os.to_upper()
 endif
-vala_flags += ['--define=' + host_arch.to_upper()]
+vala_flags += '--define=' + host_arch.to_upper()
 if host_abi != host_arch
-  vala_flags += ['--define=' + host_abi.to_upper()]
+  vala_flags += '--define=' + host_abi.to_upper()
 endif
+vala_flags += '--define=' + host_machine.endian().to_upper() + '_ENDIAN'
 add_project_arguments(vala_flags, language: 'vala')
 add_project_arguments('-I' + vapidir, language: 'c')
 
@@ -758,7 +786,6 @@ summary(
     'assets': get_option('assets'),
     'mapper': have_mapper,
     'connectivity': tls_provider_dep.found(),
-    'compiler_snapshot': generate_compiler_snapshot,
     'gadget': build_gadget,
     'server': build_server,
     'portal': build_portal,

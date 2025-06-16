@@ -454,7 +454,7 @@ namespace Frida.Fruity {
 						write_entry (entry);
 
 					size_t offset_table_offset = (size_t) seekable.tell ();
-					offset_size = compute_offset_size (sorted_entries.last ().offset);
+					offset_size = compute_offset_size (offset_table_offset);
 					foreach (var entry in sorted_entries)
 						write_offset (entry.offset);
 
@@ -1088,6 +1088,11 @@ namespace Frida.Fruity {
 			}
 
 			public void write_dict (PlistDict dict) {
+				if (dict.is_empty) {
+					write_line ("<dict/>");
+					return;
+				}
+
 				write_line ("<dict>");
 				level++;
 
@@ -1114,6 +1119,11 @@ namespace Frida.Fruity {
 			}
 
 			public void write_array (PlistArray array) {
+				if (array.is_empty) {
+					write_line ("<array/>");
+					return;
+				}
+
 				write_line ("<array>");
 				level++;
 

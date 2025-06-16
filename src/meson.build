@@ -125,6 +125,9 @@ if have_local_backend
   endif
 
   if host_os_family == 'darwin'
+    subdir('darwin' / 'agent' / 'reportcrash')
+    subdir('darwin' / 'agent' / 'osanalytics')
+
     backend_sources += [
       'darwin' / 'darwin-host-session.vala',
       'darwin' / 'darwin-host-session-glue.m',
@@ -137,8 +140,8 @@ if have_local_backend
         'darwin' / 'frida-darwin.resources',
         'darwin' / 'agent' / 'launchd.js',
         'darwin' / 'agent' / 'xpcproxy.js',
-        'darwin' / 'agent' / 'reportcrash.js',
-        'darwin' / 'agent' / 'osanalytics.js',
+        reportcrash_js,
+        osanalytics_js,
       ],
       output: [
         'frida-data-darwin.vapi',
@@ -283,6 +286,8 @@ if have_local_backend
     ]
 
     if host_os == 'android'
+      subdir('linux' / 'agent' / 'system-server')
+
       backend_vala_args_private += frida_selinux_vala_args
       backend_libs += frida_selinux
       backend_deps += frida_selinux_dep
@@ -290,7 +295,7 @@ if have_local_backend
       android_data = custom_target('frida-data-android',
         input: [
           'linux' / 'frida-android.resources',
-          'linux' / 'agent' / 'system-server.js',
+          system_server_js,
         ],
         output: [
           'frida-data-android.vapi',
